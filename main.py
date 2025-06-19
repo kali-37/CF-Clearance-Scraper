@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
-import json
-import logging
+from datetime import datetime
 import random
-from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, Final, Iterable, List, Optional
 
@@ -15,8 +12,31 @@ import zendriver
 from selenium_authenticated_proxy import SeleniumAuthenticatedProxy
 from zendriver import cdp
 from zendriver.cdp.emulation import UserAgentBrandVersion, UserAgentMetadata
-from zendriver.cdp.network import T_JSON_DICT, Cookie
+from zendriver.cdp.network import Cookie
 from zendriver.core.element import Element
+
+import logging
+
+def get_logger(name, level="INFO", async_mode=True):
+    logger = logging.getLogger(name)
+    logger.setLevel(getattr(logging, level.upper()))
+    
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    
+    return logger
+
+logger = get_logger(__name__, level="INFO", async_mode=True)
+
+
+
+
+
+# Type alias for JSON dictionary
+T_JSON_DICT = Dict[str, Any]
 
 COMMAND: Final[str] = (
     '{name}: {binary} --header "Cookie: {cookies}" --header "User-Agent: {user_agent}" {url}'
@@ -37,7 +57,6 @@ def get_chrome_user_agent() -> str:
         for user_agent in latest_user_agents.get_latest_user_agents()
         if "Chrome" in user_agent and "Edg" not in user_agent
     ]
-
     return random.choice(chrome_user_agents)
 
 
@@ -84,12 +103,6 @@ class CloudflareSolver:
         if user_agent is not None:
             config.add_argument(f"--user-agent={user_agent}")
 
-        if not http2:
-            config.add_argument("--disable-http2")
-
-        if not http3:
-            config.add_argument("--disable-quic")
-
         auth_proxy = SeleniumAuthenticatedProxy(proxy)
         auth_proxy.enrich_chrome_options(config)
 
@@ -104,13 +117,13 @@ class CloudflareSolver:
         await self.driver.stop()
 
     @staticmethod
-    def _format_cookies(cookies: Iterable[Cookie]) -> List[T_JSON_DICT]:
+    def _format_cookies(cookies: Iterable[Any]) -> List[T_JSON_DICT]:
         """
         Format cookies into a list of JSON cookies.
 
         Parameters
         ----------
-        cookies : Iterable[Cookie]
+        cookies : Iterable[Any]
             List of cookies.
 
         Returns
@@ -118,7 +131,13 @@ class CloudflareSolver:
         List[T_JSON_DICT]
             List of JSON cookies.
         """
-        return [cookie.to_json() for cookie in cookies]
+        formatted_cookies = []
+        for cookie in cookies:
+            if hasattr(cookie, "to_json"):
+                formatted_cookies.append(cookie.to_json())
+            else:
+                formatted_cookies.append(cookie)
+        return formatted_cookies
 
     @staticmethod
     def extract_clearance_cookie(
@@ -153,7 +172,13 @@ class CloudflareSolver:
         str
             The user agent string.
         """
-        return await self.driver.main_tab.evaluate("navigator.userAgent")
+        result = await self.driver.main_tab.evaluate("navigator.userAgent")
+        if isinstance(result, str):
+            return result
+        elif isinstance(result, tuple) and len(result) > 0:
+            return str(result[0])
+        else:
+            return str(result)
 
     async def get_cookies(self) -> List[T_JSON_DICT]:
         """
@@ -255,106 +280,16 @@ class CloudflareSolver:
                 await challenge.mouse_click()
 
 
-async def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="A simple program for scraping Cloudflare clearance (cf_clearance) cookies from websites issuing Cloudflare challenges to visitors"
-    )
-
-    parser.add_argument(
-        "url",
-        metavar="URL",
-        help="The URL to scrape the Cloudflare clearance cookie from",
-        type=str,
-    )
-
-    parser.add_argument(
-        "-f",
-        "--file",
-        default=None,
-        help="The file to write the Cloudflare clearance cookie information to, in JSON format",
-        type=str,
-    )
-
-    parser.add_argument(
-        "-t",
-        "--timeout",
-        default=30,
-        help="The timeout in seconds to use for solving challenges",
-        type=float,
-    )
-
-    parser.add_argument(
-        "-p",
-        "--proxy",
-        default=None,
-        help="The proxy server URL to use for the browser requests",
-        type=str,
-    )
-
-    parser.add_argument(
-        "-ua",
-        "--user-agent",
-        default=None,
-        help="The user agent to use for the browser requests",
-        type=str,
-    )
-
-    parser.add_argument(
-        "--disable-http2",
-        action="store_true",
-        help="Disable the usage of HTTP/2 for the browser requests",
-    )
-
-    parser.add_argument(
-        "--disable-http3",
-        action="store_true",
-        help="Disable the usage of HTTP/3 for the browser requests",
-    )
-
-    parser.add_argument(
-        "--headed",
-        action="store_true",
-        help="Run the browser in headed mode",
-    )
-
-    parser.add_argument(
-        "-ac",
-        "--all-cookies",
-        action="store_true",
-        help="Retrieve all cookies from the page, not just the Cloudflare clearance cookie",
-    )
-
-    parser.add_argument(
-        "-c",
-        "--curl",
-        action="store_true",
-        help="Get the cURL command for the request with the cookies and user agent",
-    )
-
-    parser.add_argument(
-        "-w",
-        "--wget",
-        action="store_true",
-        help="Get the Wget command for the request with the cookies and user agent",
-    )
-
-    parser.add_argument(
-        "-a",
-        "--aria2",
-        action="store_true",
-        help="Get the aria2 command for the request with the cookies and user agent",
-    )
-
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        format="[%(asctime)s] [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        level=logging.INFO,
-    )
-
-    logging.getLogger("zendriver").setLevel(logging.WARNING)
-    logging.info("Launching %s browser...", "headed" if args.headed else "headless")
+async def main_duo(
+    url: str,
+    proxy: str = "",
+    logger=logger,
+    headed=False,
+    user_agent=None,
+    timeout=30.0,
+):
+    logger = logger
+    logger.info("Launching %s browser...", "headed" if headed else "headless")
 
     challenge_messages = {
         ChallengePlatform.JAVASCRIPT: "Solving Cloudflare challenge [JavaScript]...",
@@ -362,22 +297,22 @@ async def main() -> None:
         ChallengePlatform.INTERACTIVE: "Solving Cloudflare challenge [Interactive]...",
     }
 
-    user_agent = get_chrome_user_agent() if args.user_agent is None else args.user_agent
+    user_agent = get_chrome_user_agent() if user_agent is None else user_agent
 
     async with CloudflareSolver(
         user_agent=user_agent,
-        timeout=args.timeout,
-        http2=not args.disable_http2,
-        http3=not args.disable_http3,
-        headless=not args.headed,
-        proxy=args.proxy,
+        timeout=timeout,
+        http2=False,
+        http3=False,
+        headless=not headed,
+        proxy=proxy,
     ) as solver:
-        logging.info("Going to %s...", args.url)
+        logger.info("Going to %s...", url)
 
         try:
-            await solver.driver.get(args.url)
+            await solver.driver.get(url)
         except asyncio.TimeoutError as err:
-            logging.error(err)
+            logger.error(err)
             return
 
         all_cookies = await solver.get_cookies()
@@ -388,10 +323,10 @@ async def main() -> None:
             challenge_platform = await solver.detect_challenge()
 
             if challenge_platform is None:
-                logging.error("No Cloudflare challenge detected.")
+                logger.error("No Cloudflare challenge detected.")
                 return
 
-            logging.info(challenge_messages[challenge_platform])
+            logger.info(challenge_messages[challenge_platform])
 
             try:
                 await solver.solve_challenge()
@@ -404,110 +339,37 @@ async def main() -> None:
         user_agent = await solver.get_user_agent()
 
     if clearance_cookie is None:
-        logging.error("Failed to retrieve a Cloudflare clearance cookie.")
+        logger.error("Failed to retrieve a Cloudflare clearance cookie.")
         return
 
-    cookie_string = "; ".join(
-        f'{cookie["name"]}={cookie["value"]}' for cookie in all_cookies
-    )
-
-    if args.all_cookies:
-        logging.info("All cookies: %s", cookie_string)
-    else:
-        logging.info("Cookie: cf_clearance=%s", clearance_cookie["value"])
-
-    logging.info("User agent: %s", user_agent)
-
-    if args.curl:
-        logging.info(
-            COMMAND.format(
-                name="cURL",
-                binary="curl",
-                cookies=(
-                    cookie_string
-                    if args.all_cookies
-                    else f'cf_clearance={clearance_cookie["value"]}'
-                ),
-                user_agent=user_agent,
-                url=(
-                    f"--proxy {args.proxy} {args.url}"
-                    if args.proxy is not None
-                    else args.url
-                ),
-            )
-        )
-
-    if args.wget:
-        if args.proxy is not None:
-            logging.warning(
-                "Proxies must be set in an environment variable or config file for Wget."
-            )
-
-        logging.info(
-            COMMAND.format(
-                name="Wget",
-                binary="wget",
-                cookies=(
-                    cookie_string
-                    if args.all_cookies
-                    else f'cf_clearance={clearance_cookie["value"]}'
-                ),
-                user_agent=user_agent,
-                url=args.url,
-            )
-        )
-
-    if args.aria2:
-        if args.proxy is not None and args.proxy.casefold().startswith("socks"):
-            logging.warning("SOCKS proxies are not supported by aria2.")
-
-        logging.info(
-            COMMAND.format(
-                name="aria2",
-                binary="aria2c",
-                cookies=(
-                    cookie_string
-                    if args.all_cookies
-                    else f'cf_clearance={clearance_cookie["value"]}'
-                ),
-                user_agent=user_agent,
-                url=(
-                    f"--all-proxy {args.proxy} {args.url}"
-                    if args.proxy is not None
-                    else args.url
-                ),
-            )
-        )
-
-    if args.file is None:
-        return
-
-    logging.info("Writing Cloudflare clearance cookie information to %s...", args.file)
-
-    try:
-        with open(args.file, encoding="utf-8") as file:
-            json_data = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
-        json_data: Dict[str, List[Dict[str, Any]]] = {}
-
-    local_timezone = datetime.now(timezone.utc).astimezone().tzinfo
-    unix_timestamp = clearance_cookie["expires"] - timedelta(days=365).total_seconds()
-    timestamp = datetime.fromtimestamp(unix_timestamp, tz=local_timezone).isoformat()
-
-    json_data.setdefault(clearance_cookie["domain"], []).append(
-        {
-            "unix_timestamp": int(unix_timestamp),
-            "timestamp": timestamp,
-            "cf_clearance": clearance_cookie["value"],
-            "cookies": all_cookies,
-            "user_agent": user_agent,
-            "proxy": args.proxy,
-        }
-    )
-
-    with open(args.file, "w", encoding="utf-8") as file:
-        json.dump(json_data, file, indent=4)
-
+    return {
+        "cf_clearance": clearance_cookie["value"],
+        "user_agent": user_agent,
+    }
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # TESTING DEBUG
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Cloudflare Clearance Scraper")
+    parser.add_argument("url", type=str, help="The URL to scrape")
+    parser.add_argument("--proxy", type=str, default="", help="Proxy server URL")
+    parser.add_argument("--headed", action="store_true", help="Run browser in headed mode")
+    parser.add_argument(
+        "--user-agent", type=str, default=None, help="Custom user agent string"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Timeout for solving challenges"
+    )
+
+    args = parser.parse_args()
+
+    logger.info(asyncio.run(
+        main_duo(
+            url=args.url,
+            proxy=args.proxy,
+            headed=args.headed,
+            user_agent=args.user_agent,
+            timeout=args.timeout,
+        )
+    ))
